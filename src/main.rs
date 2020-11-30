@@ -1,7 +1,10 @@
-use actix_web::{HttpServer, App, web, HttpResponse, Responder};
-use tera::{Tera, Context};
-use serde::{Serialize, Deserialize};
+#[macro_use]
+extern crate diesel;
+pub mod schema;
 
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use serde::{Deserialize, Serialize};
+use tera::{Context, Tera};
 
 #[derive(Debug, Deserialize)]
 struct User {
@@ -105,7 +108,7 @@ async fn main() -> std::io::Result<()> {
             .route("/submission", web::get().to(submission))
             .route("/submission", web::post().to(process_submission))
     })
-        .bind("127.0.0.1:8000")?
-        .run()
-        .await
+    .bind("127.0.0.1:8000")?
+    .run()
+    .await
 }
