@@ -17,3 +17,9 @@ pub struct NewUser {
     pub email: String,
     pub password: String,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct LoginUser {
+    pub username: String,
+    pub password: String,
+}

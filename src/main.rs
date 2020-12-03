@@ -5,12 +5,13 @@ pub mod schema;
 pub mod models;
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_identity::{Identity, CookieIdentityPolicy, IdentityService};
 use serde::{Deserialize, Serialize};
 use tera::{Context, Tera};
 use diesel::prelude::*;
 use diesel::pg::PgConnection;
 use dotenv::dotenv;
-use models::{User, NewUser};
+use models::{User, NewUser, LoginUser};
 
 
 #[derive(Serialize)]
@@ -26,23 +27,45 @@ struct Submission {
     link: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct LoginUser {
-    username: String,
-    password: String,
-}
-
-async fn login(tera: web::Data<Tera>) -> impl Responder {
+async fn login(tera: web::Data<Tera>, ident: Identity) -> impl Responder {
     let mut data = Context::new();
     data.insert("title", "Login");
+
+    if let Some(_) = ident.identity() {
+        return HttpResponse::Ok().body("Already logged in")
+    }
 
     let rendered = tera.render("login.html", &data).unwrap();
     HttpResponse::Ok().body(rendered)
 }
 
-async fn process_login(data: web::Form<LoginUser>) -> impl Responder {
-    println!("{:?}", data);
-    HttpResponse::Ok().body(format!("Logged in: {}", data.username))
+async fn process_login(data: web::Form<LoginUser>, ident: Identity) -> impl Responder {
+    use schema::users::dsl::{username, users};
+
+    let connection = establish_connection();
+    let user = users.filter(username.eq(&data.username)).first::<User>(&connection);
+
+    match user {
+        Ok(u) => {
+            if u.password == data.password {
+                let session_token = String::from(u.username);
+                ident.remember(session_token);
+                println!("{:?}", data);
+                HttpResponse::Ok().body(format!("Logged in: {}", data.username))
+            } else {
+                HttpResponse::Ok().body("Password is incorrect.")
+            }
+        },
+        Err(e) => {
+            println!("{:?}", e);
+            HttpResponse::Ok().body("User doesn't exists")
+        }
+    }
+}
+
+async fn logout(ident: Identity) -> impl Responder {
+    ident.forget();
+    HttpResponse::Ok().body("Logged out")
 }
 
 async fn submission(tera: web::Data<Tera>) -> impl Responder {
@@ -118,12 +141,18 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
         let tera = Tera::new("templates/**/*").unwrap();
         App::new()
+            .wrap(IdentityService::new(
+                CookieIdentityPolicy::new(&[0;32])
+                    .name("auth-cookie")
+                    .secure(false)
+            ))
             .data(tera)
             .route("/", web::get().to(index))
             .route("/signup", web::get().to(signup))
             .route("/signup", web::post().to(process_signup))
             .route("/login", web::get().to(login))
             .route("/login", web::post().to(process_login))
+            .route("/logout", web::to(logout))
             .route("/submission", web::get().to(submission))
             .route("/submission", web::post().to(process_submission))
     })
