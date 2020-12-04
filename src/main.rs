@@ -12,6 +12,7 @@ use diesel::prelude::*;
 use diesel::pg::PgConnection;
 use dotenv::dotenv;
 use models::{User, NewUser, LoginUser, Post, NewPost};
+use diesel::pg::expression::array_comparison::all;
 
 
 #[derive(Deserialize)]
@@ -133,12 +134,17 @@ async fn process_signup(data: web::Form<NewUser>) -> impl Responder {
 }
 
 async fn index(tera: web::Data<Tera>) -> impl Responder {
+    use schema::posts::dsl::{posts};
+    use schema::users::dsl::{users};
+
+    let connection = establish_connection();
+    let all_posts: Vec<(Post, User)> = posts.inner_join(users)
+        .load(&connection)
+        .expect("Error retrieving all posts");
+
     let mut data = Context::new();
-
-    let posts = "";
-
     data.insert("title", "Hacker Clone");
-    data.insert("posts", &posts);
+    data.insert("posts_users", &all_posts);
 
     let rendered = tera.render("index.html", &data).unwrap();
     HttpResponse::Ok().body(rendered)
