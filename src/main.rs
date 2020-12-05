@@ -1,18 +1,17 @@
 #[macro_use]
 extern crate diesel;
 
-pub mod schema;
 pub mod models;
+pub mod schema;
 
+use actix_identity::{CookieIdentityPolicy, Identity, IdentityService};
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use actix_identity::{Identity, CookieIdentityPolicy, IdentityService};
-use serde::{Deserialize};
-use tera::{Context, Tera};
-use diesel::prelude::*;
 use diesel::pg::PgConnection;
+use diesel::prelude::*;
 use dotenv::dotenv;
-use models::{User, NewUser, LoginUser, Post, NewPost};
-
+use models::*;
+use serde::Deserialize;
+use tera::{Context, Tera};
 
 #[derive(Deserialize)]
 pub struct PostForm {
@@ -31,7 +30,7 @@ async fn login(tera: web::Data<Tera>, ident: Identity) -> impl Responder {
     data.insert("title", "Login");
 
     if let Some(_) = ident.identity() {
-        return HttpResponse::Ok().body("Already logged in")
+        return HttpResponse::Ok().body("Already logged in");
     }
 
     let rendered = tera.render("login.html", &data).unwrap();
@@ -42,7 +41,9 @@ async fn process_login(data: web::Form<LoginUser>, ident: Identity) -> impl Resp
     use schema::users::dsl::{username, users};
 
     let connection = establish_connection();
-    let user = users.filter(username.eq(&data.username)).first::<User>(&connection);
+    let user = users
+        .filter(username.eq(&data.username))
+        .first::<User>(&connection);
 
     match user {
         Ok(u) => {
@@ -54,7 +55,7 @@ async fn process_login(data: web::Form<LoginUser>, ident: Identity) -> impl Resp
             } else {
                 HttpResponse::Ok().body("Password is incorrect.")
             }
-        },
+        }
         Err(e) => {
             println!("{:?}", e);
             HttpResponse::Ok().body("User doesn't exists")
@@ -80,12 +81,12 @@ async fn submission(tera: web::Data<Tera>, ident: Identity) -> impl Responder {
 }
 
 async fn process_submission(data: web::Form<PostForm>, ident: Identity) -> impl Responder {
-
     if let Some(id) = ident.identity() {
         use schema::users::dsl::{username, users};
 
         let connection = establish_connection();
-        let user: Result<User, diesel::result::Error> = users.filter(username.eq(id)).first(&connection);
+        let user: Result<User, diesel::result::Error> =
+            users.filter(username.eq(id)).first(&connection);
 
         return match user {
             Ok(u) => {
@@ -104,7 +105,7 @@ async fn process_submission(data: web::Form<PostForm>, ident: Identity) -> impl 
                 println!("{:?}", e);
                 HttpResponse::Ok().body("Failed to find user")
             }
-        }
+        };
     }
 
     HttpResponse::Unauthorized().body("User not logged in")
@@ -133,11 +134,12 @@ async fn process_signup(data: web::Form<NewUser>) -> impl Responder {
 }
 
 async fn index(tera: web::Data<Tera>) -> impl Responder {
-    use schema::posts::dsl::{posts};
-    use schema::users::dsl::{users};
+    use schema::posts::dsl::posts;
+    use schema::users::dsl::users;
 
     let connection = establish_connection();
-    let all_posts: Vec<(Post, User)> = posts.inner_join(users)
+    let all_posts: Vec<(Post, User)> = posts
+        .inner_join(users)
         .load(&connection)
         .expect("Error retrieving all posts");
 
@@ -152,11 +154,101 @@ async fn index(tera: web::Data<Tera>) -> impl Responder {
 fn establish_connection() -> PgConnection {
     dotenv().ok();
 
-    let database_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
-    PgConnection::establish(&database_url)
-        .expect(&format!("Error connecting to {}", database_url))
+    PgConnection::establish(&database_url).expect(&format!("Error connecting to {}", database_url))
+}
+
+async fn post_page(
+    tera: web::Data<Tera>,
+    ident: Identity,
+    web::Path(post_id): web::Path<i32>,
+) -> impl Responder {
+    use schema::posts::dsl::{posts};
+    use schema::users::dsl::{users};
+
+    let connection = establish_connection();
+
+    let post: Post = posts.find(post_id)
+        .get_result(&connection)
+        .expect("Failed to find posts");
+
+    let user: User = users.find(post.author)
+        .get_result(&connection)
+        .expect("Failed to find user");
+
+    let comments: Vec<(Comment, User)> = Comment::belonging_to(&post)
+        .inner_join(users)
+        .load(&connection)
+        .expect("Failed to find comments");
+
+    let mut data = Context::new();
+    data.insert("title", &format!("{} - HackerClone", post.title));
+    data.insert("post", &post);
+    data.insert("user", &user);
+    data.insert("comments", &comments);
+
+    if let Some(_) = ident.identity() {
+        data.insert("logged in", "true");
+    } else {
+        data.insert("logged in", "false");
+    }
+
+    let rendered = tera.render("post.html", &data).unwrap();
+    HttpResponse::Ok().body(rendered)
+}
+
+#[derive(Deserialize)]
+struct CommentForm {
+    comment: String,
+}
+
+async fn comment(
+    data: web::Form<CommentForm>,
+    ident: Identity,
+    web::Path(post_id): web::Path<i32>
+) -> impl Responder {
+
+    if let Some(id) = ident.identity() {
+        use schema::posts::dsl::{posts};
+        use schema::users::dsl::{users, username};
+
+        let connection = establish_connection();
+
+        let post: Post = posts.find(post_id)
+            .get_result(&connection)
+            .expect("Failed to find post");
+
+        let user: Result<User, diesel::result::Error> = users
+            .filter(username.eq(id))
+            .first(&connection);
+
+        return match user {
+            Ok(u) => {
+                let parent_id = None;
+                let new_comment = NewComment::new(
+                    data.comment.clone(),
+                    post.id,
+                    u.id,
+                    parent_id
+                );
+
+                use schema::comments;
+                diesel::insert_into(comments::table)
+                    .values(&new_comment)
+                    .get_result::<Comment>(&connection)
+                    .expect("Error saving comment");
+
+                HttpResponse::Ok().body("Commented")
+            }
+            Err(e) => {
+                println!("{:?}", e);
+                HttpResponse::Ok().body("User not found")
+            }
+        }
+    }
+
+    HttpResponse::Unauthorized().body("Not logged in")
 }
 
 #[actix_web::main]
@@ -165,9 +257,9 @@ async fn main() -> std::io::Result<()> {
         let tera = Tera::new("templates/**/*").unwrap();
         App::new()
             .wrap(IdentityService::new(
-                CookieIdentityPolicy::new(&[0;32])
+                CookieIdentityPolicy::new(&[0; 32])
                     .name("auth-cookie")
-                    .secure(false)
+                    .secure(false),
             ))
             .data(tera)
             .route("/", web::get().to(index))
@@ -178,6 +270,11 @@ async fn main() -> std::io::Result<()> {
             .route("/logout", web::to(logout))
             .route("/submission", web::get().to(submission))
             .route("/submission", web::post().to(process_submission))
+            .service(
+                web::resource("/post/{post_id}")
+                    .route(web::get().to(post_page))
+                    .route(web::post().to(comment))
+            )
     })
     .bind("127.0.0.1:8000")?
     .run()
