@@ -12,7 +12,6 @@ use diesel::prelude::*;
 use diesel::pg::PgConnection;
 use dotenv::dotenv;
 use models::{User, NewUser, LoginUser, Post, NewPost};
-use diesel::pg::expression::array_comparison::all;
 
 
 #[derive(Deserialize)]

@@ -1,9 +1,9 @@
 use super::schema::{users, posts};
 use diesel::{Queryable, Insertable};
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 use crate::PostForm;
 
-#[derive(Queryable)]
+#[derive(Serialize, Queryable)]
 pub struct User {
     pub id: i32,
     pub username: String,
@@ -45,7 +45,7 @@ impl NewPost {
     }
 }
 
-#[derive(Debug, Queryable)]
+#[derive(Serialize, Debug, Queryable)]
 pub struct Post {
     pub id: i32,
     pub title: String,
