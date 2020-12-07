@@ -3,7 +3,7 @@ use crate::PostForm;
 use diesel::{Insertable, Queryable, Identifiable};
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Queryable)]
+#[derive(Debug, Serialize, Queryable, Identifiable)]
 pub struct User {
     pub id: i32,
     pub username: String,
@@ -45,7 +45,8 @@ impl NewPost {
     }
 }
 
-#[derive(Serialize, Debug, Queryable, Identifiable)]
+#[derive(Serialize, Debug, Queryable, Identifiable, Associations)]
+#[belongs_to(User, foreign_key="author")]
 pub struct Post {
     pub id: i32,
     pub title: String,
@@ -56,6 +57,7 @@ pub struct Post {
 
 #[derive(Serialize, Debug, Queryable, Identifiable, Associations)]
 #[belongs_to(Post)]
+#[belongs_to(User)]
 pub struct Comment {
     pub id: i32,
     pub comment: String,

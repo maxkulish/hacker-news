@@ -251,6 +251,32 @@ async fn comment(
     HttpResponse::Unauthorized().body("Not logged in")
 }
 
+async fn user_profile(tera: web::Data<Tera>, web::Path(requested_user): web::Path<String>) -> impl Responder {
+    use schema::users::dsl::{username, users};
+
+    let connection = establish_connection();
+    let user: User = users.filter(username.eq(requested_user))
+        .get_result(&connection)
+        .expect("Failed to find user");
+
+    let posts: Vec<Post> = Post::belonging_to(&user)
+        .load(&connection)
+        .expect("Failed to find posts");
+
+    let comments: Vec<Comment> = Comment::belonging_to(&user)
+        .load(&connection)
+        .expect("Failed to find comments");
+
+    let mut data = Context::new();
+    data.insert("title", &format!("{} - Profile", user.username));
+    data.insert("user", &user);
+    data.insert("posts", &posts);
+    data.insert("comments", &comments);
+
+    let renderer = tera.render("profile.html", &data).unwrap();
+    HttpResponse::Ok().body(renderer)
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
@@ -273,7 +299,10 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/post/{post_id}")
                     .route(web::get().to(post_page))
-                    .route(web::post().to(comment))
+                    .route(web::post().to(comment)))
+            .service(
+                web::resource("/user/{username}")
+                    .route(web::get().to(user_profile))
             )
     })
     .bind("127.0.0.1:8000")?
