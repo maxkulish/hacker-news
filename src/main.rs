@@ -6,12 +6,16 @@ pub mod schema;
 
 use actix_identity::{CookieIdentityPolicy, Identity, IdentityService};
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use argonautica::Verifier;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
+use diesel::r2d2::ConnectionManager;
 use dotenv::dotenv;
 use models::*;
 use serde::Deserialize;
 use tera::{Context, Tera};
+
+type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
 
 #[derive(Deserialize)]
 pub struct PostForm {
@@ -23,6 +27,13 @@ pub struct PostForm {
 struct Submission {
     title: String,
     link: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NewUserForm {
+    pub username: String,
+    pub email: String,
+    pub password: String,
 }
 
 async fn login(tera: web::Data<Tera>, ident: Identity) -> impl Responder {
@@ -37,20 +48,34 @@ async fn login(tera: web::Data<Tera>, ident: Identity) -> impl Responder {
     HttpResponse::Ok().body(rendered)
 }
 
-async fn process_login(data: web::Form<LoginUser>, ident: Identity) -> impl Responder {
+async fn process_login(
+    data: web::Form<LoginUser>,
+    ident: Identity,
+    pool: web::Data<Pool>,
+) -> impl Responder {
     use schema::users::dsl::{username, users};
 
-    let connection = establish_connection();
+    let connection = pool.get().unwrap();
     let user = users
         .filter(username.eq(&data.username))
         .first::<User>(&connection);
 
     match user {
         Ok(u) => {
-            if u.password == data.password {
+            dotenv().ok();
+
+            let secret = std::env::var("SECRET_KEY").expect("SECRET_KEY must be set");
+
+            let valid = Verifier::default()
+                .with_hash(u.password)
+                .with_password(&data.password.clone())
+                .with_secret_key(&secret)
+                .verify()
+                .unwrap();
+
+            if valid {
                 let session_token = String::from(u.username);
                 ident.remember(session_token);
-                println!("{:?}", data);
                 HttpResponse::Ok().body(format!("Logged in: {}", data.username))
             } else {
                 HttpResponse::Ok().body("Password is incorrect.")
@@ -80,11 +105,15 @@ async fn submission(tera: web::Data<Tera>, ident: Identity) -> impl Responder {
     HttpResponse::Unauthorized().body("User not logged in")
 }
 
-async fn process_submission(data: web::Form<PostForm>, ident: Identity) -> impl Responder {
+async fn process_submission(
+    data: web::Form<PostForm>,
+    ident: Identity,
+    pool: web::Data<Pool>,
+) -> impl Responder {
     if let Some(id) = ident.identity() {
         use schema::users::dsl::{username, users};
 
-        let connection = establish_connection();
+        let connection = pool.get().unwrap();
         let user: Result<User, diesel::result::Error> =
             users.filter(username.eq(id)).first(&connection);
 
@@ -119,25 +148,27 @@ async fn signup(tera: web::Data<Tera>) -> impl Responder {
     HttpResponse::Ok().body(rendered)
 }
 
-async fn process_signup(data: web::Form<NewUser>) -> impl Responder {
-    use schema::users::dsl::*;
+async fn process_signup(data: web::Form<NewUserForm>, pool: web::Data<Pool>) -> impl Responder {
+    use schema::users::dsl::users;
 
-    let connection = establish_connection();
+    let connection = pool.get().unwrap();
+
+    let username = &data.username.clone();
+    let new_user = NewUser::new(data.into_inner());
 
     diesel::insert_into(users)
-        .values(&*data)
+        .values(&new_user)
         .get_result::<User>(&connection)
         .expect("Error registering user");
 
-    println!("{:?}", data);
-    HttpResponse::Ok().body(format!("Successfully saved user: {}", data.username))
+    HttpResponse::Ok().body(format!("Successfully saved user: {}", username))
 }
 
-async fn index(tera: web::Data<Tera>) -> impl Responder {
+async fn index(tera: web::Data<Tera>, pool: web::Data<Pool>) -> impl Responder {
     use schema::posts::dsl::posts;
     use schema::users::dsl::users;
 
-    let connection = establish_connection();
+    let connection = pool.get().unwrap();
     let all_posts: Vec<(Post, User)> = posts
         .inner_join(users)
         .load(&connection)
@@ -151,29 +182,24 @@ async fn index(tera: web::Data<Tera>) -> impl Responder {
     HttpResponse::Ok().body(rendered)
 }
 
-fn establish_connection() -> PgConnection {
-    dotenv().ok();
-
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-
-    PgConnection::establish(&database_url).expect(&format!("Error connecting to {}", database_url))
-}
-
 async fn post_page(
     tera: web::Data<Tera>,
     ident: Identity,
     web::Path(post_id): web::Path<i32>,
+    pool: web::Data<Pool>,
 ) -> impl Responder {
-    use schema::posts::dsl::{posts};
-    use schema::users::dsl::{users};
+    use schema::posts::dsl::posts;
+    use schema::users::dsl::users;
 
-    let connection = establish_connection();
+    let connection = pool.get().unwrap();
 
-    let post: Post = posts.find(post_id)
+    let post: Post = posts
+        .find(post_id)
         .get_result(&connection)
         .expect("Failed to find posts");
 
-    let user: User = users.find(post.author)
+    let user: User = users
+        .find(post.author)
         .get_result(&connection)
         .expect("Failed to find user");
 
@@ -206,32 +232,27 @@ struct CommentForm {
 async fn comment(
     data: web::Form<CommentForm>,
     ident: Identity,
-    web::Path(post_id): web::Path<i32>
+    pool: web::Data<Pool>,
+    web::Path(post_id): web::Path<i32>,
 ) -> impl Responder {
-
     if let Some(id) = ident.identity() {
-        use schema::posts::dsl::{posts};
-        use schema::users::dsl::{users, username};
+        use schema::posts::dsl::posts;
+        use schema::users::dsl::{username, users};
 
-        let connection = establish_connection();
+        let connection = pool.get().unwrap();
 
-        let post: Post = posts.find(post_id)
+        let post: Post = posts
+            .find(post_id)
             .get_result(&connection)
             .expect("Failed to find post");
 
-        let user: Result<User, diesel::result::Error> = users
-            .filter(username.eq(id))
-            .first(&connection);
+        let user: Result<User, diesel::result::Error> =
+            users.filter(username.eq(id)).first(&connection);
 
         return match user {
             Ok(u) => {
                 let parent_id = None;
-                let new_comment = NewComment::new(
-                    data.comment.clone(),
-                    post.id,
-                    u.id,
-                    parent_id
-                );
+                let new_comment = NewComment::new(data.comment.clone(), post.id, u.id, parent_id);
 
                 use schema::comments;
                 diesel::insert_into(comments::table)
@@ -245,17 +266,22 @@ async fn comment(
                 println!("{:?}", e);
                 HttpResponse::Ok().body("User not found")
             }
-        }
+        };
     }
 
     HttpResponse::Unauthorized().body("Not logged in")
 }
 
-async fn user_profile(tera: web::Data<Tera>, web::Path(requested_user): web::Path<String>) -> impl Responder {
+async fn user_profile(
+    tera: web::Data<Tera>,
+    web::Path(requested_user): web::Path<String>,
+    pool: web::Data<Pool>,
+) -> impl Responder {
     use schema::users::dsl::{username, users};
 
-    let connection = establish_connection();
-    let user: User = users.filter(username.eq(requested_user))
+    let connection = pool.get().unwrap();
+    let user: User = users
+        .filter(username.eq(requested_user))
         .get_result(&connection)
         .expect("Failed to find user");
 
@@ -279,7 +305,15 @@ async fn user_profile(tera: web::Data<Tera>, web::Path(requested_user): web::Pat
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| {
+    dotenv().ok();
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+
+    let manager = ConnectionManager::<PgConnection>::new(database_url);
+    let pool = r2d2::Pool::builder()
+        .build(manager)
+        .expect("Failed to create postgres pool");
+
+    HttpServer::new(move || {
         let tera = Tera::new("templates/**/*").unwrap();
         App::new()
             .wrap(IdentityService::new(
@@ -288,6 +322,7 @@ async fn main() -> std::io::Result<()> {
                     .secure(false),
             ))
             .data(tera)
+            .data(pool.clone())
             .route("/", web::get().to(index))
             .route("/signup", web::get().to(signup))
             .route("/signup", web::post().to(process_signup))
@@ -299,11 +334,9 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/post/{post_id}")
                     .route(web::get().to(post_page))
-                    .route(web::post().to(comment)))
-            .service(
-                web::resource("/user/{username}")
-                    .route(web::get().to(user_profile))
+                    .route(web::post().to(comment)),
             )
+            .service(web::resource("/user/{username}").route(web::get().to(user_profile)))
     })
     .bind("127.0.0.1:8000")?
     .run()

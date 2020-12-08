@@ -1,6 +1,8 @@
-use super::schema::{posts, users, comments};
-use crate::PostForm;
-use diesel::{Insertable, Queryable, Identifiable};
+use super::schema::{comments, posts, users};
+use crate::{NewUserForm, PostForm};
+use argonautica::Hasher;
+use diesel::{Identifiable, Insertable, Queryable};
+use dotenv::dotenv;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Queryable, Identifiable)]
@@ -17,6 +19,26 @@ pub struct NewUser {
     pub username: String,
     pub email: String,
     pub password: String,
+}
+
+impl NewUser {
+    pub fn new(form: NewUserForm) -> Self {
+        dotenv().ok();
+
+        let secret = std::env::var("SECRET_KEY").expect("SECRET_KEY must be set");
+
+        let hash = Hasher::default()
+            .with_password(&form.password)
+            .with_secret_key(secret)
+            .hash()
+            .unwrap();
+
+        NewUser {
+            username: form.username,
+            email: form.email.clone(),
+            password: hash,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,7 +68,7 @@ impl NewPost {
 }
 
 #[derive(Serialize, Debug, Queryable, Identifiable, Associations)]
-#[belongs_to(User, foreign_key="author")]
+#[belongs_to(User, foreign_key = "author")]
 pub struct Post {
     pub id: i32,
     pub title: String,
@@ -78,7 +100,12 @@ pub struct NewComment {
 }
 
 impl NewComment {
-    pub fn new(comment: String, post_id: i32, user_id: i32, parent_comment_id: Option<i32>) -> Self {
+    pub fn new(
+        comment: String,
+        post_id: i32,
+        user_id: i32,
+        parent_comment_id: Option<i32>,
+    ) -> Self {
         NewComment {
             comment,
             post_id,
