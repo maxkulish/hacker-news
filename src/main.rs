@@ -3,10 +3,12 @@ extern crate diesel;
 
 pub mod models;
 pub mod schema;
+pub mod errors;
 
 use actix_identity::{CookieIdentityPolicy, Identity, IdentityService};
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use argonautica::Verifier;
+use actix_web::middleware::Logger;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::r2d2::ConnectionManager;
@@ -14,7 +16,7 @@ use dotenv::dotenv;
 use models::*;
 use serde::Deserialize;
 use tera::{Context, Tera};
-use std::fmt;
+use errors::ServerError;
 
 type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
 
@@ -35,60 +37,6 @@ pub struct NewUserForm {
     pub username: String,
     pub email: String,
     pub password: String,
-}
-
-#[derive(Debug)]
-enum ServerError {
-    ArgonauticError,
-    DieselError,
-    EnvironmentError,
-    R2D2Error,
-    UserError(String)
-}
-
-impl fmt::Display for ServerError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Test")
-    }
-}
-
-impl actix_web::error::ResponseError for ServerError {
-    fn error_response(&self) -> HttpResponse {
-        match self {
-            ServerError::ArgonauticError => HttpResponse::InternalServerError().json("Argonautica Error"),
-            ServerError::DieselError => HttpResponse::InternalServerError().json("Diesel Error"),
-            ServerError::EnvironmentError => HttpResponse::InternalServerError().json("Environment Error"),
-            ServerError::R2D2Error => HttpResponse::InternalServerError().json("r2d2 Error"),
-            ServerError::UserError(data) => HttpResponse::InternalServerError().json(data),
-        }
-    }
-}
-
-impl From<std::env::VarError> for ServerError {
-    fn from(_: std::env::VarError) -> ServerError {
-        ServerError::EnvironmentError
-    }
-}
-
-impl From<r2d2::Error> for ServerError {
-    fn from(_: r2d2::Error) -> ServerError {
-        ServerError::R2D2Error
-    }
-}
-
-impl From<diesel::result::Error> for ServerError {
-    fn from(err: diesel::result::Error) -> ServerError {
-        match err {
-            diesel::result::Error::NotFound => ServerError::UserError("Username not found.".to_string()),
-            _ => ServerError::DieselError
-        }
-    }
-}
-
-impl From<argonautica::Error> for ServerError {
-    fn from(_: argonautica::Error) -> ServerError {
-        ServerError::ArgonauticError
-    }
 }
 
 async fn login(tera: web::Data<Tera>, ident: Identity) -> impl Responder {
@@ -353,6 +301,8 @@ async fn user_profile(
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
+    env_logger::init();
+
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     let manager = ConnectionManager::<PgConnection>::new(database_url);
@@ -363,6 +313,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         let tera = Tera::new("templates/**/*").unwrap();
         App::new()
+            .wrap(Logger::default())
             .wrap(IdentityService::new(
                 CookieIdentityPolicy::new(&[0; 32])
                     .name("auth-cookie")

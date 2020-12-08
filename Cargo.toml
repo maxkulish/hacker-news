@@ -16,3 +16,5 @@ actix-identity = "0.3.1"
 chrono = { version = "0.4", features = ["serde"] }
 argonautica = "0.2.0"
 r2d2 = "0.8"
+env_logger = "0.8"
+log = "0.4"
