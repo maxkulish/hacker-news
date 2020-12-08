@@ -14,6 +14,7 @@ use dotenv::dotenv;
 use models::*;
 use serde::Deserialize;
 use tera::{Context, Tera};
+use std::fmt;
 
 type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
 
@@ -36,6 +37,60 @@ pub struct NewUserForm {
     pub password: String,
 }
 
+#[derive(Debug)]
+enum ServerError {
+    ArgonauticError,
+    DieselError,
+    EnvironmentError,
+    R2D2Error,
+    UserError(String)
+}
+
+impl fmt::Display for ServerError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Test")
+    }
+}
+
+impl actix_web::error::ResponseError for ServerError {
+    fn error_response(&self) -> HttpResponse {
+        match self {
+            ServerError::ArgonauticError => HttpResponse::InternalServerError().json("Argonautica Error"),
+            ServerError::DieselError => HttpResponse::InternalServerError().json("Diesel Error"),
+            ServerError::EnvironmentError => HttpResponse::InternalServerError().json("Environment Error"),
+            ServerError::R2D2Error => HttpResponse::InternalServerError().json("r2d2 Error"),
+            ServerError::UserError(data) => HttpResponse::InternalServerError().json(data),
+        }
+    }
+}
+
+impl From<std::env::VarError> for ServerError {
+    fn from(_: std::env::VarError) -> ServerError {
+        ServerError::EnvironmentError
+    }
+}
+
+impl From<r2d2::Error> for ServerError {
+    fn from(_: r2d2::Error) -> ServerError {
+        ServerError::R2D2Error
+    }
+}
+
+impl From<diesel::result::Error> for ServerError {
+    fn from(err: diesel::result::Error) -> ServerError {
+        match err {
+            diesel::result::Error::NotFound => ServerError::UserError("Username not found.".to_string()),
+            _ => ServerError::DieselError
+        }
+    }
+}
+
+impl From<argonautica::Error> for ServerError {
+    fn from(_: argonautica::Error) -> ServerError {
+        ServerError::ArgonauticError
+    }
+}
+
 async fn login(tera: web::Data<Tera>, ident: Identity) -> impl Responder {
     let mut data = Context::new();
     data.insert("title", "Login");
@@ -52,40 +107,32 @@ async fn process_login(
     data: web::Form<LoginUser>,
     ident: Identity,
     pool: web::Data<Pool>,
-) -> impl Responder {
+) -> Result<HttpResponse, ServerError> {
     use schema::users::dsl::{username, users};
 
-    let connection = pool.get().unwrap();
+    let connection = pool.get()?;
     let user = users
         .filter(username.eq(&data.username))
-        .first::<User>(&connection);
+        .first::<User>(&connection)?;
 
-    match user {
-        Ok(u) => {
-            dotenv().ok();
+    dotenv().ok();
 
-            let secret = std::env::var("SECRET_KEY").expect("SECRET_KEY must be set");
+    let secret = std::env::var("SECRET_KEY")?;
 
-            let valid = Verifier::default()
-                .with_hash(u.password)
-                .with_password(&data.password.clone())
-                .with_secret_key(&secret)
-                .verify()
-                .unwrap();
+    let valid = Verifier::default()
+        .with_hash(user.password)
+        .with_password(&data.password.clone())
+        .with_secret_key(&secret)
+        .verify()?;
 
-            if valid {
-                let session_token = String::from(u.username);
-                ident.remember(session_token);
-                HttpResponse::Ok().body(format!("Logged in: {}", data.username))
-            } else {
-                HttpResponse::Ok().body("Password is incorrect.")
-            }
-        }
-        Err(e) => {
-            println!("{:?}", e);
-            HttpResponse::Ok().body("User doesn't exists")
-        }
+    if valid {
+        let session_token = String::from(user.username);
+        ident.remember(session_token);
+        Ok(HttpResponse::Ok().body(format!("Logged in: {}", data.username)))
+    } else {
+        Ok(HttpResponse::Ok().body("Password is incorrect."))
     }
+
 }
 
 async fn logout(ident: Identity) -> impl Responder {
@@ -109,11 +156,11 @@ async fn process_submission(
     data: web::Form<PostForm>,
     ident: Identity,
     pool: web::Data<Pool>,
-) -> impl Responder {
+) -> Result<HttpResponse, ServerError> {
     if let Some(id) = ident.identity() {
         use schema::users::dsl::{username, users};
 
-        let connection = pool.get().unwrap();
+        let connection = pool.get()?;
         let user: Result<User, diesel::result::Error> =
             users.filter(username.eq(id)).first(&connection);
 
@@ -128,16 +175,16 @@ async fn process_submission(
                     .get_result::<Post>(&connection)
                     .expect("Error saving post");
 
-                HttpResponse::Ok().body("Submitted")
+                Ok(HttpResponse::Ok().body("Submitted"))
             }
             Err(e) => {
                 println!("{:?}", e);
-                HttpResponse::Ok().body("Failed to find user")
+                Ok(HttpResponse::Ok().body("Failed to find user"))
             }
         };
     }
 
-    HttpResponse::Unauthorized().body("User not logged in")
+    Ok(HttpResponse::Unauthorized().body("User not logged in"))
 }
 
 async fn signup(tera: web::Data<Tera>) -> impl Responder {
@@ -148,10 +195,10 @@ async fn signup(tera: web::Data<Tera>) -> impl Responder {
     HttpResponse::Ok().body(rendered)
 }
 
-async fn process_signup(data: web::Form<NewUserForm>, pool: web::Data<Pool>) -> impl Responder {
+async fn process_signup(data: web::Form<NewUserForm>, pool: web::Data<Pool>) -> Result<HttpResponse, ServerError> {
     use schema::users::dsl::users;
 
-    let connection = pool.get().unwrap();
+    let connection = pool.get()?;
 
     let username = &data.username.clone();
     let new_user = NewUser::new(data.into_inner());
@@ -161,14 +208,14 @@ async fn process_signup(data: web::Form<NewUserForm>, pool: web::Data<Pool>) -> 
         .get_result::<User>(&connection)
         .expect("Error registering user");
 
-    HttpResponse::Ok().body(format!("Successfully saved user: {}", username))
+    Ok(HttpResponse::Ok().body(format!("Successfully saved user: {}", username)))
 }
 
-async fn index(tera: web::Data<Tera>, pool: web::Data<Pool>) -> impl Responder {
+async fn index(tera: web::Data<Tera>, pool: web::Data<Pool>) -> Result<HttpResponse, ServerError> {
     use schema::posts::dsl::posts;
     use schema::users::dsl::users;
 
-    let connection = pool.get().unwrap();
+    let connection = pool.get()?;
     let all_posts: Vec<(Post, User)> = posts
         .inner_join(users)
         .load(&connection)
@@ -179,7 +226,7 @@ async fn index(tera: web::Data<Tera>, pool: web::Data<Pool>) -> impl Responder {
     data.insert("posts_users", &all_posts);
 
     let rendered = tera.render("index.html", &data).unwrap();
-    HttpResponse::Ok().body(rendered)
+    Ok(HttpResponse::Ok().body(rendered))
 }
 
 async fn post_page(
@@ -187,11 +234,11 @@ async fn post_page(
     ident: Identity,
     web::Path(post_id): web::Path<i32>,
     pool: web::Data<Pool>,
-) -> impl Responder {
+) -> Result<HttpResponse, ServerError> {
     use schema::posts::dsl::posts;
     use schema::users::dsl::users;
 
-    let connection = pool.get().unwrap();
+    let connection = pool.get()?;
 
     let post: Post = posts
         .find(post_id)
@@ -221,7 +268,7 @@ async fn post_page(
     }
 
     let rendered = tera.render("post.html", &data).unwrap();
-    HttpResponse::Ok().body(rendered)
+    Ok(HttpResponse::Ok().body(rendered))
 }
 
 #[derive(Deserialize)]
@@ -234,12 +281,12 @@ async fn comment(
     ident: Identity,
     pool: web::Data<Pool>,
     web::Path(post_id): web::Path<i32>,
-) -> impl Responder {
+) -> Result<HttpResponse, ServerError> {
     if let Some(id) = ident.identity() {
         use schema::posts::dsl::posts;
         use schema::users::dsl::{username, users};
 
-        let connection = pool.get().unwrap();
+        let connection = pool.get()?;
 
         let post: Post = posts
             .find(post_id)
@@ -260,26 +307,26 @@ async fn comment(
                     .get_result::<Comment>(&connection)
                     .expect("Error saving comment");
 
-                HttpResponse::Ok().body("Commented")
+                Ok(HttpResponse::Ok().body("Commented"))
             }
             Err(e) => {
                 println!("{:?}", e);
-                HttpResponse::Ok().body("User not found")
+                Ok(HttpResponse::Ok().body("User not found"))
             }
         };
     }
 
-    HttpResponse::Unauthorized().body("Not logged in")
+    Ok(HttpResponse::Unauthorized().body("Not logged in"))
 }
 
 async fn user_profile(
     tera: web::Data<Tera>,
     web::Path(requested_user): web::Path<String>,
     pool: web::Data<Pool>,
-) -> impl Responder {
+) -> Result<HttpResponse, ServerError> {
     use schema::users::dsl::{username, users};
 
-    let connection = pool.get().unwrap();
+    let connection = pool.get()?;
     let user: User = users
         .filter(username.eq(requested_user))
         .get_result(&connection)
@@ -300,7 +347,7 @@ async fn user_profile(
     data.insert("comments", &comments);
 
     let renderer = tera.render("profile.html", &data).unwrap();
-    HttpResponse::Ok().body(renderer)
+    Ok(HttpResponse::Ok().body(renderer))
 }
 
 #[actix_web::main]
